@@ -8,6 +8,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.food.FoodData;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 
@@ -20,12 +21,14 @@ public final class SharedVitalsState extends SavedData {
     public static final Codec<SharedVitalsState> CODEC = RecordCodecBuilder.create(instance -> instance.group(
             Codec.BOOL.fieldOf("initialized").forGetter(state -> state.initialized),
             Codec.floatRange(0, Float.MAX_VALUE).fieldOf("health").forGetter(state -> state.health),
-            FoodSnapshot.CODEC.fieldOf("hunger").forGetter(state -> FoodSnapshot.capture(state.food))
+            FoodSnapshot.CODEC.fieldOf("hunger").forGetter(state -> FoodSnapshot.capture(state.food)),
+            Codec.BOOL.optionalFieldOf("waitingForTransfer", false).forGetter(state -> state.waitingForTransfer)
     ).apply(instance, SharedVitalsState::new));
     public static final SavedDataType<SharedVitalsState> TYPE = new SavedDataType<>(
             Identifier.fromNamespaceAndPath(SharedVitalsMod.MOD_ID, "vitals"), SharedVitalsState::new, CODEC, null);
 
     private boolean initialized;
+    private boolean waitingForTransfer;
     private float health = 20;
     private FoodData food = new FoodData();
     // Runtime membership is deliberately not saved. Identity checks exclude player construction/loading.
@@ -35,10 +38,11 @@ public final class SharedVitalsState extends SavedData {
 
     public SharedVitalsState() { }
 
-    private SharedVitalsState(boolean initialized, float health, FoodSnapshot food) {
+    private SharedVitalsState(boolean initialized, float health, FoodSnapshot food, boolean waitingForTransfer) {
         this.initialized = initialized;
         this.health = health;
         this.food = food.restore();
+        this.waitingForTransfer = waitingForTransfer;
     }
 
     public static SharedVitalsState get(MinecraftServer server) {
@@ -54,6 +58,12 @@ public final class SharedVitalsState extends SavedData {
     }
 
     public void join(ServerPlayer player) {
+        if (waitingForTransfer) {
+            // Source-world joins and proxy-requested respawns cannot start another run here.
+            leave(player);
+            if (eligible(player) && player.isAlive()) player.setGameMode(GameType.SPECTATOR);
+            return;
+        }
         if (!eligible(player)) {
             leave(player);
             return;
@@ -87,7 +97,7 @@ public final class SharedVitalsState extends SavedData {
             if (!eligible(member) || server.getPlayerList().getPlayer(member.getUUID()) != member) leave(member);
         }
         for (var player : server.getPlayerList().getPlayers()) join(player);
-        if (initialized && health > 0) publishHealth(Math.min(health, maximumHealth()));
+        if (!waitingForTransfer && initialized && health > 0) publishHealth(Math.min(health, maximumHealth()));
     }
 
     public void healthChanged(ServerPlayer player) {
@@ -119,7 +129,15 @@ public final class SharedVitalsState extends SavedData {
     }
 
     public void died(ServerPlayer player, DamageSource source) {
-        if (applying || !contains(player)) return;
+        if (applying || waitingForTransfer) return;
+        var server = player.level().getServer();
+        if (SharedVitalsSettings.get(server).linkedHardcore()) {
+            // Linked Hardcore reports ANY player death. Preserve the original event and avoid
+            // synthetic deaths/counter inflation while its proxy chooses the next world.
+            prepareLinkedTransfer(server);
+            return;
+        }
+        if (!contains(player)) return;
         health = 0;
         applying = true;
         try {
@@ -139,6 +157,10 @@ public final class SharedVitalsState extends SavedData {
 
     public void respawn(ServerPlayer oldPlayer, ServerPlayer newPlayer, boolean alive) {
         leave(oldPlayer);
+        if (waitingForTransfer) {
+            join(newPlayer);
+            return;
+        }
         if (!eligible(newPlayer)) {
             leave(newPlayer);
             return;
@@ -162,10 +184,23 @@ public final class SharedVitalsState extends SavedData {
 
     public boolean allowFoodTick(FoodData data, ServerPlayer player) {
         if (data != food) return true;
+        if (waitingForTransfer) return false;
         if (!contains(player) || !isFoodLeader(player)) return false;
         int tick = player.level().getServer().getTickCount();
         if (lastFoodTick == tick) return false;
         lastFoodTick = tick;
         return true;
+    }
+
+    public boolean waitingForTransfer() {
+        return waitingForTransfer;
+    }
+
+    public void prepareLinkedTransfer(MinecraftServer server) {
+        if (!SharedVitalsSettings.get(server).linkedHardcore()) return;
+        waitingForTransfer = true;
+        health = 0;
+        setDirty();
+        for (var online : new ArrayList<>(server.getPlayerList().getPlayers())) join(online);
     }
 }

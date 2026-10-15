@@ -2,16 +2,22 @@ package com.evanchubbuck.sharedvitals;
 
 import com.evanchubbuck.sharedvitals.mixin.FoodDataAccessor;
 import com.mojang.authlib.GameProfile;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.serialization.JsonOps;
 import io.netty.channel.embedded.EmbeddedChannel;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
+import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
+import net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.CommonListenerCookie;
+import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.server.permissions.PermissionSet;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.InteractionHand;
@@ -28,8 +34,19 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.HashMap;
+import java.util.Map;
+import java.io.IOException;
+import java.lang.reflect.Proxy;
 
 public final class SharedVitalsGameTests {
+    private static final Map<UUID, Integer> DEATHS = new HashMap<>();
+    static {
+        ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
+            if (entity instanceof ServerPlayer player) DEATHS.computeIfPresent(player.getUUID(), (id, count) -> count + 1);
+        });
+    }
+
     @GameTest
     public void damageAndHealingShareImmediately(GameTestHelper helper) {
         try (var f = new Fixture(helper)) {
@@ -316,17 +333,282 @@ public final class SharedVitalsGameTests {
         helper.succeed();
     }
 
+    @GameTest
+    public void linkedModeSharesVitalsButReportsOnlyOriginalDeath(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            var b = f.player();
+            a.setHealth(6);
+            helper.assertValueEqual(b.getHealth(), 6F, "Linked mode still shares health during play");
+            b.getFoodData().setFoodLevel(8);
+            helper.assertValueEqual(a.getFoodData().getFoodLevel(), 8, "Linked mode still shares hunger");
+            a.hurtServer(a.level(), a.damageSources().genericKill(), Float.MAX_VALUE);
+            helper.assertValueEqual(DEATHS.get(a.getUUID()), 1, "The real death remains visible to Linked Hardcore");
+            helper.assertValueEqual(DEATHS.get(b.getUUID()), 0, "No synthetic death is sent for a teammate");
+            helper.assertTrue(b.isAlive() && b.isSpectator(), "Survivors wait safely in spectator");
+            helper.assertTrue(f.state.waitingForTransfer(), "The ended source run is latched");
+            if (SharedVitalsSettings.linkedHardcoreInstalled()) {
+                helper.assertValueEqual(f.deathFrames(), 1, "Actual Linked Hardcore sends exactly one PLAYER_DIED frame");
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void linkedModeDoesNotTreatTotemAsDeath(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            var b = f.player();
+            a.setItemInHand(InteractionHand.OFF_HAND, new ItemStack(Items.TOTEM_OF_UNDYING));
+            a.hurtServer(a.level(), a.damageSources().generic(), 100);
+            helper.assertFalse(f.state.waitingForTransfer(), "A totem does not end the linked run");
+            helper.assertFalse(b.isSpectator(), "Teammates keep playing after a totem save");
+            helper.assertValueEqual(b.getHealth(), 1F, "Totem health still propagates");
+            helper.assertValueEqual(DEATHS.get(a.getUUID()), 0, "No death callback occurs for a totem save");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void linkedRespawnsAndLateArrivalsStaySpectator(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            a.hurtServer(a.level(), a.damageSources().genericKill(), Float.MAX_VALUE);
+            var replacement = f.respawn(a);
+            helper.assertTrue(replacement.isAlive() && replacement.isSpectator(), "Proxy respawn does not reopen the source world");
+            var late = f.player();
+            helper.assertTrue(late.isAlive() && late.isSpectator(), "Late source arrivals wait without another death");
+            late.setGameMode(GameType.SURVIVAL);
+            helper.assertTrue(late.isSpectator(), "Linked Hardcore's survival-on-join cannot reopen an ended source");
+            f.state.tick(f.server);
+            helper.assertTrue(f.state.waitingForTransfer(), "Tick and respawn leave the pending transfer intact");
+            helper.assertValueEqual(DEATHS.get(late.getUUID()), 0, "Late arrivals do not inflate death totals");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void linkedEndedWorldPersistsButFreshWorldStartsFull(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            a.hurtServer(a.level(), a.damageSources().genericKill(), Float.MAX_VALUE);
+            var encoded = SharedVitalsState.CODEC.encodeStart(JsonOps.INSTANCE, f.state).getOrThrow();
+            var restored = SharedVitalsState.CODEC.parse(JsonOps.INSTANCE, encoded).getOrThrow();
+            f.server.getDataStorage().set(SharedVitalsState.TYPE, restored);
+            var late = f.player();
+            helper.assertTrue(restored.waitingForTransfer() && late.isSpectator(), "An ordinary restart preserves the ended run");
+            helper.assertValueEqual(DEATHS.get(late.getUUID()), 0, "Restart recovery creates no synthetic deaths");
+            f.server.getPlayerList().remove(a);
+            f.server.getPlayerList().remove(late);
+            // The executor deletes world saved data, while preserving backend configuration.
+            f.server.getDataStorage().set(SharedVitalsState.TYPE, new SharedVitalsState());
+            var fresh = f.player();
+            helper.assertTrue(f.settings.linkedHardcore(), "Integration survives the fresh-world boundary");
+            helper.assertFalse(SharedVitalsState.get(f.server).waitingForTransfer(), "A fresh world opens the next run");
+            helper.assertValueEqual(fresh.getHealth(), 20F, "Fresh world starts at full health");
+            helper.assertValueEqual(fresh.getFoodData().getFoodLevel(), 20, "Fresh world starts at full food");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void linkedCommandRequiresOperatorAndInstalledMod(GameTestHelper helper) throws Exception {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            f.expectCommandFailure(a, "sharedvitals linkedhardcore true", false);
+            helper.assertFalse(f.settings.linkedHardcore(), "Non-operators cannot change the setting");
+            helper.assertValueEqual(f.command(a, "sharedvitals status", true), 1, "Operators can inspect status");
+            if (SharedVitalsSettings.linkedHardcoreInstalled()) {
+                helper.assertValueEqual(f.command(a, "sharedvitals linkedhardcore true", true), 1, "Operator enables integration explicitly");
+                helper.assertTrue(f.settings.linkedHardcore(), "Command enables Linked Hardcore mode");
+                a.hurtServer(a.level(), a.damageSources().genericKill(), Float.MAX_VALUE);
+                f.expectCommandFailure(a, "sharedvitals linkedhardcore false", true);
+                helper.assertTrue(f.settings.linkedHardcore(), "Disabling mid-transfer cannot reopen the ended world");
+                helper.assertValueEqual(f.command(a, "sharedvitals linkedhardcore true", true), 1, "Repeated enable is harmless");
+            } else {
+                f.expectCommandFailure(a, "sharedvitals linkedhardcore true", true);
+                helper.assertFalse(f.settings.linkedHardcore(), "Enabling without the companion mod fails safely");
+                helper.assertValueEqual(f.command(a, "sharedvitals linkedhardcore false", true), 1, "Standalone mode remains available");
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void linkedConfigPersistsAndRejectsFailedWrites(GameTestHelper helper) throws Exception {
+        var directory = Files.createTempDirectory("shared-vitals-config-test");
+        var file = directory.resolve("shared-vitals.json");
+        try {
+            var config = new SharedVitalsSettings(file);
+            helper.assertFalse(config.linkedHardcore(), "Integration is opt-in by default");
+            config.setLinkedHardcore(true);
+            helper.assertTrue(new SharedVitalsSettings(file).linkedHardcore(), "Configuration survives a reload");
+            config.setLinkedHardcore(false);
+            Files.delete(file);
+            Files.createDirectory(file);
+            try {
+                config.setLinkedHardcore(true);
+                throw helper.assertionException("A failed write unexpectedly succeeded");
+            } catch (IOException expected) {
+                helper.assertFalse(config.linkedHardcore(), "A failed write does not activate an unsaved setting");
+            }
+        } finally {
+            Files.deleteIfExists(file);
+            try (var paths = Files.list(directory)) {
+                helper.assertValueEqual(paths.count(), 0L, "Temporary config files are cleaned up after failure");
+            }
+            Files.delete(directory);
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void enabledConfigCannotSilentlyFallBackWithoutCompanion(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            if (SharedVitalsSettings.linkedHardcoreInstalled()) {
+                SharedVitalsSettings.start(f.server);
+                helper.assertTrue(f.settings.linkedHardcore(), "Installed companion permits enabled startup");
+            } else {
+                try {
+                    SharedVitalsSettings.start(f.server);
+                    throw helper.assertionException("Missing companion silently fell back to standalone behavior");
+                } catch (IllegalStateException expected) {
+                    helper.assertTrue(expected.getMessage().contains("linkedhardcore"), "Startup explains the missing companion");
+                }
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void malformedConfigIsRejected(GameTestHelper helper) throws Exception {
+        var file = Files.createTempFile("shared-vitals-invalid-", ".json");
+        try {
+            for (var content : List.of("{", "null", "{}", "{\"linkedHardcore\":\"true\"}")) {
+                Files.writeString(file, content);
+                try {
+                    new SharedVitalsSettings(file);
+                    throw helper.assertionException("Malformed config was accepted: " + content);
+                } catch (IOException expected) {
+                    // Configuration mistakes must not silently change the death policy.
+                }
+            }
+        } finally {
+            Files.delete(file);
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void existingWorldDataRemainsReadable(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            a.setHealth(13);
+            a.getFoodData().setFoodLevel(4);
+            var original = SharedVitalsState.CODEC.encodeStart(JsonOps.INSTANCE, f.state).getOrThrow().getAsJsonObject();
+            original.remove("waitingForTransfer");
+            var loaded = SharedVitalsState.CODEC.parse(JsonOps.INSTANCE, original).getOrThrow();
+            f.state.leave(a);
+            f.server.getDataStorage().set(SharedVitalsState.TYPE, loaded);
+            var b = f.player();
+            helper.assertFalse(loaded.waitingForTransfer(), "Old world data defaults to an active run");
+            helper.assertValueEqual(b.getHealth(), 13F, "Old shared health is preserved");
+            helper.assertValueEqual(b.getFoodData().getFoodLevel(), 4, "Old shared hunger is preserved");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void actualLinkedHardcoreWaitAndCountdownAreCompatible(GameTestHelper helper) throws Exception {
+        if (!SharedVitalsSettings.linkedHardcoreInstalled()) {
+            helper.succeed(); // Enable the optional external-JAR run for this compatibility case.
+            return;
+        }
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            var b = f.player();
+            Class<?> configType = Class.forName("dev.linkedhardcore.fabric.config.ModConfig");
+            Class<?> notifierType = Class.forName("dev.linkedhardcore.fabric.death.TransferReadyNotifier");
+            Class<?> countdownType = Class.forName("dev.linkedhardcore.fabric.death.TransferCountdown");
+            Object config = configType.getConstructor(String.class, int.class, int.class).newInstance("test", 10, 0);
+            int[] ready = {0};
+            Object notifier = Proxy.newProxyInstance(notifierType.getClassLoader(), new Class<?>[]{notifierType},
+                    (proxy, method, args) -> { ready[0]++; return null; });
+            Object countdown = countdownType.getConstructor(configType, notifierType).newInstance(config, notifier);
+            countdownType.getMethod("waitForServer", MinecraftServer.class).invoke(countdown, f.server);
+            helper.assertTrue(f.state.waitingForTransfer(), "Actual WAIT_FOR_SERVER latches sources without a local death");
+            helper.assertTrue(a.isSpectator() && b.isSpectator(), "Actual wait flow leaves everyone in spectator");
+            countdownType.getMethod("start", MinecraftServer.class).invoke(countdown, f.server);
+            countdownType.getMethod("tick", MinecraftServer.class).invoke(countdown, f.server);
+            helper.assertValueEqual(ready[0], 1, "Actual countdown still signals TRANSFER_READY");
+            helper.assertValueEqual(DEATHS.get(a.getUUID()) + DEATHS.get(b.getUUID()), 0, "Remote deaths create no local deaths");
+        }
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            Class<?> configType = Class.forName("dev.linkedhardcore.fabric.config.ModConfig");
+            Class<?> notifierType = Class.forName("dev.linkedhardcore.fabric.death.TransferReadyNotifier");
+            Class<?> countdownType = Class.forName("dev.linkedhardcore.fabric.death.TransferCountdown");
+            Object config = configType.getConstructor(String.class, int.class, int.class).newInstance("test", 10, 0);
+            Object notifier = Proxy.newProxyInstance(notifierType.getClassLoader(), new Class<?>[]{notifierType},
+                    (proxy, method, args) -> null);
+            Object countdown = countdownType.getConstructor(configType, notifierType).newInstance(config, notifier);
+            countdownType.getMethod("start", MinecraftServer.class).invoke(countdown, f.server);
+            helper.assertTrue(f.state.waitingForTransfer() && a.isSpectator(), "Direct PREPARE_TRANSFER also latches the source");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void actualLinkedWaitRespawnsVictimWithoutReopeningRun(GameTestHelper helper) throws Exception {
+        if (!SharedVitalsSettings.linkedHardcoreInstalled()) {
+            helper.succeed();
+            return;
+        }
+        try (var f = new Fixture(helper)) {
+            f.linkedMode(true);
+            var a = f.player();
+            var b = f.player();
+            a.hurtServer(a.level(), a.damageSources().genericKill(), Float.MAX_VALUE);
+            Class<?> configType = Class.forName("dev.linkedhardcore.fabric.config.ModConfig");
+            Class<?> notifierType = Class.forName("dev.linkedhardcore.fabric.death.TransferReadyNotifier");
+            Class<?> countdownType = Class.forName("dev.linkedhardcore.fabric.death.TransferCountdown");
+            Object config = configType.getConstructor(String.class, int.class, int.class).newInstance("test", 10, 0);
+            Object notifier = Proxy.newProxyInstance(notifierType.getClassLoader(), new Class<?>[]{notifierType},
+                    (proxy, method, args) -> null);
+            Object countdown = countdownType.getConstructor(configType, notifierType).newInstance(config, notifier);
+            countdownType.getMethod("waitForServer", MinecraftServer.class).invoke(countdown, f.server);
+            var replacement = a.connection.player;
+            helper.assertTrue(replacement != a && replacement.isAlive(), "Linked Hardcore uses vanilla respawn for the dead victim");
+            helper.assertTrue(replacement.isSpectator() && b.isSpectator(), "Victim and survivors remain spectators");
+            helper.assertTrue(f.state.waitingForTransfer(), "Vanilla respawn leaves the source run ended");
+            helper.assertValueEqual(f.deathFrames(), 1, "Wait/respawn produces no second death report");
+        }
+        helper.succeed();
+    }
+
     private static final class Fixture implements AutoCloseable {
         final GameTestHelper helper;
         final MinecraftServer server;
         final SharedVitalsState state;
         final Difficulty originalDifficulty;
+        final SharedVitalsSettings settings;
+        final boolean originalLinkedMode;
         final List<ServerPlayer> players = new ArrayList<>();
         final List<EmbeddedChannel> channels = new ArrayList<>();
 
         Fixture(GameTestHelper helper) {
             this.helper = helper;
             server = helper.getLevel().getServer();
+            settings = SharedVitalsSettings.get(server);
+            originalLinkedMode = settings.linkedHardcore();
+            linkedMode(false);
             state = new SharedVitalsState();
             server.getDataStorage().set(SharedVitalsState.TYPE, state);
             originalDifficulty = server.getWorldData().getDifficulty();
@@ -343,6 +625,7 @@ public final class SharedVitalsGameTests {
             channels.add(new EmbeddedChannel(connection));
             server.getPlayerList().placeNewPlayer(connection, player, cookie);
             players.add(player);
+            DEATHS.putIfAbsent(player.getUUID(), 0);
             player.setGameMode(GameType.SURVIVAL);
             player.connection.handleAcceptPlayerLoad(new ServerboundPlayerLoadedPacket());
             return player;
@@ -354,14 +637,62 @@ public final class SharedVitalsGameTests {
             return player;
         }
 
+        void linkedMode(boolean enabled) {
+            try {
+                settings.setLinkedHardcore(enabled);
+            } catch (IOException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        int command(ServerPlayer player, String command, boolean operator) throws CommandSyntaxException {
+            var source = player.createCommandSourceStack().withPermission(
+                    operator ? LevelBasedPermissionSet.GAMEMASTER : PermissionSet.NO_PERMISSIONS);
+            return server.getCommands().getDispatcher().execute(command, source);
+        }
+
+        void expectCommandFailure(ServerPlayer player, String command, boolean operator) throws CommandSyntaxException {
+            try {
+                command(player, command, operator);
+                throw helper.assertionException("Command unexpectedly succeeded: " + command);
+            } catch (CommandSyntaxException expected) {
+                // Required permission, missing companion mod, or ended-run guard rejected it.
+            }
+        }
+
+        int deathFrames() {
+            int count = 0;
+            for (var channel : channels) {
+                Object packet;
+                while ((packet = channel.readOutbound()) != null) {
+                    if (packet instanceof ClientboundCustomPayloadPacket custom
+                            && custom.payload().type().id().toString().equals("linkedhardcore:main")) {
+                        try {
+                            byte[] frame = (byte[]) custom.payload().getClass().getMethod("data").invoke(custom.payload());
+                            if (frame.length > 0 && frame[0] == 1) count++;
+                        } catch (ReflectiveOperationException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    }
+                }
+            }
+            return count;
+        }
+
         @Override
         public void close() {
             for (var player : players) {
-                if (server.getPlayerList().getPlayer(player.getUUID()) == player) server.getPlayerList().remove(player);
+                var current = server.getPlayerList().getPlayer(player.getUUID());
+                if (current != null) {
+                    server.getPlayerList().remove(current);
+                    current.discard();
+                }
                 player.discard();
+                DEATHS.remove(player.getUUID());
             }
             server.getDataStorage().set(SharedVitalsState.TYPE, new SharedVitalsState());
             server.setDifficulty(originalDifficulty, true);
+            linkedMode(originalLinkedMode);
             for (var channel : channels) channel.finishAndReleaseAll();
         }
     }

@@ -22,9 +22,15 @@ def verify(path: Path, expected_version: str) -> None:
             raise ValueError("Unexpected main entrypoint")
         jar.getinfo(entrypoint.replace(".", "/") + ".class")
         jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsState.class")
+        jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsCommands.class")
+        jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsSettings.class")
+        jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsMixinPlugin.class")
+        jar.getinfo("com/evanchubbuck/sharedvitals/mixin/LinkedHardcoreTransferMixin.class")
         if metadata.get("mixins") != ["shared_vitals.mixins.json"]:
             raise ValueError("Missing shared vitals mixin configuration")
         mixins = json.loads(jar.read("shared_vitals.mixins.json"))
+        if mixins.get("plugin") != "com.evanchubbuck.sharedvitals.SharedVitalsMixinPlugin":
+            raise ValueError("Missing optional integration mixin plugin")
         if not mixins.get("required") or mixins.get("injectors", {}).get("defaultRequire") != 1:
             raise ValueError("Gameplay mixins must be required")
         expected_mixins = {
