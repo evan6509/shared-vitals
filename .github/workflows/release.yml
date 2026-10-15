@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Preserve pending releases when several merges arrive close together.
+concurrency:
+  group: main-releases
+  queue: max
+
+jobs:
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Select release version
+        shell: bash
+        run: echo "SHARED_VITALS_VERSION=0.1.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+      - name: Check release notes
+        run: python3 -m unittest discover -s tests -v
+      - name: Build mod
+        run: ./gradlew --no-daemon clean build
+      - name: Verify mod JAR
+        shell: bash
+        run: |
+          python3 scripts/verify_jar.py \
+            "build/libs/shared-vitals-${SHARED_VITALS_VERSION}+mc26.2.jar" \
+            "${SHARED_VITALS_VERSION}+mc26.2"
+      - name: Prepare assets and changelog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "build/libs/shared-vitals-${SHARED_VITALS_VERSION}+mc26.2.jar" dist/
+          gh api --paginate "repos/${GH_REPO}/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            > "$RUNNER_TEMP/published-tags"
+          previous_tag=''
+          while IFS= read -r candidate; do
+            [[ "$candidate" == "v${SHARED_VITALS_VERSION}" ]] && continue
+            if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+               git merge-base --is-ancestor "$candidate" "$GITHUB_SHA"; then
+              previous_tag="$candidate"
+              break
+            fi
+          done < "$RUNNER_TEMP/published-tags"
+          python3 scripts/release_notes.py "$SHARED_VITALS_VERSION" "$GH_REPO" \
+            "$GITHUB_SHA" "$previous_tag" > dist/CHANGELOG.md
+          (cd dist && sha256sum ./*.jar CHANGELOG.md > SHA256SUMS)
+      - name: Publish verified release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v${SHARED_VITALS_VERSION}"
+          # Fetch errors fail the step instead of masquerading as a missing release.
+          gh api --paginate "repos/${GH_REPO}/releases" \
+            --jq ".[] | select(.tag_name == \"${tag}\") | .draft" \
+            > "$RUNNER_TEMP/existing-release"
+          state=$(cat "$RUNNER_TEMP/existing-release")
+          if [[ "$state" == 'false' ]]; then
+            echo "Release $tag is already published; leaving it unchanged."
+            exit 0
+          fi
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            test "$(git rev-list -n 1 "$tag")" = "$GITHUB_SHA"
+          fi
+          if [[ "$state" != 'true' ]]; then
+            gh release create "$tag" --target "$GITHUB_SHA" --draft \
+              --title "Shared Vitals $SHARED_VITALS_VERSION" \
+              --notes-file dist/CHANGELOG.md
+          fi
+          gh release upload "$tag" dist/*.jar dist/CHANGELOG.md dist/SHA256SUMS --clobber
+          gh release edit "$tag" --notes-file dist/CHANGELOG.md
+          mkdir -p "$RUNNER_TEMP/release-download"
+          gh release download "$tag" --dir "$RUNNER_TEMP/release-download" --clobber
+          (cd "$RUNNER_TEMP/release-download" && sha256sum --check "$GITHUB_WORKSPACE/dist/SHA256SUMS")
+          cmp dist/SHA256SUMS "$RUNNER_TEMP/release-download/SHA256SUMS"
+          latest=false
+          if [[ "$(gh api "repos/${GH_REPO}/commits/main" --jq .sha)" == "$GITHUB_SHA" ]]; then
+            latest=true
+          fi
+          gh release edit "$tag" --draft=false --latest="$latest"

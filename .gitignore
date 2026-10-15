@@ -1,0 +1,16 @@
+.gradle/
+build/
+dist/
+run/
+out/
+.idea/
+*.iml
+.vscode/
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.codex/
+.agents/

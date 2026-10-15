@@ -1,0 +1,36 @@
+name: Build
+
+on:
+  push:
+    branches: [codex/development]
+  pull_request:
+    branches: [main, codex/development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: Check release notes
+        run: python3 -m unittest discover -s tests -v
+      - name: Build mod
+        run: ./gradlew --no-daemon clean build
+      - name: Verify mod JAR
+        run: python3 scripts/verify_jar.py build/libs/shared-vitals-0.1.0+mc26.2.jar 0.1.0+mc26.2

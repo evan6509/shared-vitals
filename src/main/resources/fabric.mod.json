@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "shared_vitals",
+  "version": "${version}",
+  "name": "Shared Vitals",
+  "description": "A Fabric mod project for shared player health and hunger. Gameplay is not implemented yet.",
+  "authors": ["Evan Chubbuck"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.evanchubbuck.sharedvitals.SharedVitalsMod"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.2",
+    "java": ">=25",
+    "fabric-api": ">=0.154.2"
+  }
+}
