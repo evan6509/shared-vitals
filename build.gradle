@@ -43,6 +43,13 @@ sourceSets {
     }
 }
 
+// Optional compatibility run; the external mod is never bundled in Shared Vitals.
+if (providers.gradleProperty('linkedHardcoreJar').isPresent()) {
+    dependencies {
+        gametestRuntimeOnly files(providers.gradleProperty('linkedHardcoreJar').get())
+    }
+}
+
 loom {
     mods {
         shared_vitals { sourceSet sourceSets.main }

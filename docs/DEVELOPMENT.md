@@ -33,6 +33,36 @@ death, real player respawns, dimensions, maximum health, and saved-data disk
 reloads. Results are written to `build/gametest-results.xml`. Test code is not
 included in the installable mod JAR.
 
+Linked Hardcore coverage checks the opt-in command and permissions, configuration
+persistence/failure handling, original-death-only handling, totems, late arrivals,
+proxy respawns, ended-run persistence, fresh-world initialization, and migration
+of existing saved data. The mode is stored per backend in
+`config/shared-vitals.json`; the ended-run flag is stored with the world's pool.
+
+To also load the real Linked Hardcore mod and exercise its wait/countdown hooks
+and outbound `PLAYER_DIED` frame, supply its built JAR:
+
+```sh
+./gradlew --no-daemon runGametest \
+  -Pfabric_version=0.156.0+26.2 \
+  -PlinkedHardcoreJar=/absolute/path/to/linked-hardcore/fabric-mod/build/libs/fabric-mod-0.1.0.jar
+```
+
+The companion JAR is a test runtime dependency and is never bundled or required
+for standalone Shared Vitals. Without it, the actual-companion test case returns
+without running its compatibility assertions; the other linked-state tests still
+run. The optional transfer mixin targets Linked Hardcore's
+`TransferCountdown.waitForServer(MinecraftServer)` and
+`TransferCountdown.start(MinecraftServer)`. No protocol opcodes or proxy state
+files are modified.
+
+For full deployment validation, install both mods on every backend, enable the
+mode through each backend console, and connect two real clients through Velocity.
+Check one death count, spectator/countdown behavior, fresh-world health/food,
+reconnects during waiting, proxy/backend restart recovery, and a second death
+after rotating back to a reset backend. The companion GameTests exercise its
+backend classes; they do not run a real proxy or Docker reset loop.
+
 Before releasing gameplay changes, also test with two real clients: take damage
 and eat on either client, sprint together, change dimensions, use a totem, die,
 respawn at different times, reconnect, and restart the server. Check both HUDs,
