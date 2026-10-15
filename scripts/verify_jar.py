@@ -21,6 +21,22 @@ def verify(path: Path, expected_version: str) -> None:
         if metadata.get("entrypoints", {}).get("main") != [entrypoint]:
             raise ValueError("Unexpected main entrypoint")
         jar.getinfo(entrypoint.replace(".", "/") + ".class")
+        jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsState.class")
+        if metadata.get("mixins") != ["shared_vitals.mixins.json"]:
+            raise ValueError("Missing shared vitals mixin configuration")
+        mixins = json.loads(jar.read("shared_vitals.mixins.json"))
+        if not mixins.get("required") or mixins.get("injectors", {}).get("defaultRequire") != 1:
+            raise ValueError("Gameplay mixins must be required")
+        expected_mixins = {
+            "FoodDataAccessor", "FoodDataMixin", "LivingEntityMixin", "PlayerAccessor",
+            "ServerPlayerGameModeMixin", "ServerPlayerMixin",
+        }
+        if set(mixins.get("mixins", [])) != expected_mixins:
+            raise ValueError("Unexpected gameplay mixin list")
+        for mixin in expected_mixins:
+            jar.getinfo((mixins["package"] + "." + mixin).replace(".", "/") + ".class")
+        if any(name.startswith("com/evanchubbuck/sharedvitals/SharedVitalsGameTests") for name in jar.namelist()):
+            raise ValueError("GameTest classes must not be shipped in the mod JAR")
         if metadata["depends"]["minecraft"] != "26.2":
             raise ValueError("Unexpected Minecraft version")
     print(f"Verified {path.name}: {expected_version}")

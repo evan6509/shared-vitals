@@ -3,13 +3,14 @@
   "id": "shared_vitals",
   "version": "${version}",
   "name": "Shared Vitals",
-  "description": "A Fabric mod project for shared player health and hunger. Gameplay is not implemented yet.",
+  "description": "Survival and adventure players share health, hunger, and death across the server.",
   "authors": ["Evan Chubbuck"],
   "license": "MIT",
   "environment": "*",
   "entrypoints": {
     "main": ["com.evanchubbuck.sharedvitals.SharedVitalsMod"]
   },
+  "mixins": ["shared_vitals.mixins.json"],
   "depends": {
     "fabricloader": ">=0.19.3",
     "minecraft": "26.2",

@@ -39,6 +39,8 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Build mod
         run: ./gradlew --no-daemon clean build
+      - name: Test gameplay on a headless server
+        run: ./gradlew --no-daemon runGametest
       - name: Verify mod JAR
         shell: bash
         run: |

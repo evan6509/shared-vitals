@@ -5,7 +5,7 @@
 - `codex/development`: normal development by you and Codex. This is the checked-out branch.
 - `main`: changes you have chosen to release. Nothing merges automatically.
 
-Both branches start at the same initial setup commit. To switch back to development:
+To switch back to development:
 
 ```sh
 git switch codex/development
@@ -13,7 +13,7 @@ git switch codex/development
 
 When you choose to release, merge `codex/development` into `main` through a GitHub
 pull request, or merge locally and push `main`. The workflow does not merge for you.
-Branch protection can be configured after a GitHub repository exists.
+The GitHub repository is `evan6509/shared-vitals`.
 
 ## Local checks
 
@@ -21,9 +21,23 @@ Use JDK 25 and Python 3.10 or later:
 
 ```sh
 ./gradlew --no-daemon clean build
+./gradlew --no-daemon runGametest
 python3 -m unittest discover -s tests -v
 python3 scripts/verify_jar.py build/libs/shared-vitals-0.1.0+mc26.2.jar 0.1.0+mc26.2
 ```
+
+`runGametest` starts a headless Minecraft server with the actual mod and mixins.
+It covers shared damage/healing, same-tick hits, armor/absorption, food and
+exhaustion, regeneration/starvation timing, joins, mode changes, totems, shared
+death, real player respawns, dimensions, maximum health, and saved-data disk
+reloads. Results are written to `build/gametest-results.xml`. Test code is not
+included in the installable mod JAR.
+
+Before releasing gameplay changes, also test with two real clients: take damage
+and eat on either client, sprint together, change dimensions, use a totem, die,
+respawn at different times, reconnect, and restart the server. Check both HUDs,
+death screens, inventory drops/`keepInventory`, and hardcore behavior. Headless
+tests do not establish client behavior or compatibility with other mods.
 
 ## Automated releases
 
@@ -55,10 +69,5 @@ Publication uses the repository's automatic `GITHUB_TOKEN` with `contents: write
 No personal access token is needed. The release always targets the triggering
 commit, even if `main` moves while the build runs.
 
-## Future GitHub setup
-
-No remote is configured. When you decide to host this project, use `shared-vitals`
-as the repository name and `main` as its default branch, then upload both branches.
-The first push to `main` will publish a release, so implement the gameplay on
-`codex/development` and choose what to merge before that push if you want the first
-release to contain it. Workflows remain inactive until the project is uploaded.
+The `origin` remote points to `https://github.com/evan6509/shared-vitals.git`.
+Development work stays on `codex/development` until you choose to release it.

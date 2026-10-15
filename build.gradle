@@ -35,3 +35,27 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 jar { from('LICENSE') }
+
+sourceSets {
+    gametest {
+        compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+        runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.main.output
+    }
+}
+
+loom {
+    mods {
+        shared_vitals { sourceSet sourceSets.main }
+        shared_vitals_tests { sourceSet sourceSets.gametest }
+    }
+    runs {
+        gametest {
+            server()
+            name 'Shared Vitals Game Tests'
+            source sourceSets.gametest
+            vmArg '-Dfabric-api.gametest'
+            vmArg "-Dfabric-api.gametest.report-file=${layout.buildDirectory.get()}/gametest-results.xml"
+            runDir 'build/gametest'
+        }
+    }
+}

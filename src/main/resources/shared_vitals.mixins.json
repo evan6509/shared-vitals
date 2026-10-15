@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "com.evanchubbuck.sharedvitals.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "FoodDataAccessor",
+    "FoodDataMixin",
+    "LivingEntityMixin",
+    "PlayerAccessor",
+    "ServerPlayerGameModeMixin",
+    "ServerPlayerMixin"
+  ],
+  "injectors": { "defaultRequire": 1 }
+}

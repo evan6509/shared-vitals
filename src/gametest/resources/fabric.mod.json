@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "shared_vitals_tests",
+  "version": "1.0.0",
+  "name": "Shared Vitals Tests",
+  "environment": "server",
+  "entrypoints": {
+    "fabric-gametest": ["com.evanchubbuck.sharedvitals.SharedVitalsGameTests"]
+  },
+  "depends": {
+    "shared_vitals": "*",
+    "fabric-gametest-api-v1": "*"
+  }
+}
