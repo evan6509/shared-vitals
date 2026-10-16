@@ -56,6 +56,13 @@ join/leader/creative-mode transitions. Tick-dependent effect logic uses the same
 participant's vanilla context as shared food. For direct repeated player-tick
 tests, call the state's server-start tick between simulated ticks.
 
+Review regression coverage checks equal private/group effects after reload and
+game-mode rejoining, actual speed/strength/absorption modifiers and update packets
+after upgrades/hidden downgrades, and absorption backed by remaining base capacity
+after explicit removal, milk, or natural expiration. Minecraft 26.2's
+`forceAddEffect` replaces the mapped instance and refreshes existing modifiers;
+the tests protect those assumptions without removing and restarting effects.
+
 Linked Hardcore coverage checks the opt-in command and permissions, configuration
 persistence/failure handling, original-death-only handling, totems, late arrivals,
 proxy respawns, ended-run persistence, fresh-world initialization, and migration

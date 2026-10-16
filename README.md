@@ -27,6 +27,8 @@ share health, hunger, absorption hearts, status effects, and death across every 
   that supply once before reducing shared health. The absorption effect's
   strength, remaining duration, expiration, and removal are shared too. Late
   joins and reconnects adopt the remaining hearts without refilling them.
+  Removing a timed absorption effect preserves hearts still supported by the
+  source player's remaining vanilla absorption capacity, including direct grants.
 - Status effects are shared, including their strength, remaining duration,
   particles, and normal HUD/inventory icons. Each effect ticks once for the group:
   regeneration, poison, wither, and hunger do not multiply with player count.

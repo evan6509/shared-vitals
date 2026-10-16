@@ -168,7 +168,9 @@ public final class SharedVitalsState extends SavedData {
         effects.changed(player, type, members.values());
         if (type.equals(MobEffects.ABSORPTION)) {
             absorptionEffect = effects.get(type);
-            absorption = absorptionEffect == null ? 0 : player.getAbsorptionAmount();
+            // Vanilla already clamps to the capacity left after removing the effect.
+            // A base attribute or direct grant can still support golden hearts.
+            absorption = player.getAbsorptionAmount();
             publishAbsorption(player);
         }
         setDirty();

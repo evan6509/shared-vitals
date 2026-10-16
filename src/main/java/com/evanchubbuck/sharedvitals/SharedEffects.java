@@ -55,6 +55,7 @@ public final class SharedEffects {
                 if (!active.containsKey(type)) player.removeEffect(type);
             }
             for (var effect : active.values()) {
+                // In 26.2 forceAddEffect replaces the map entry even for equal values.
                 if (player.getEffect(effect.getEffect()) != effect) player.forceAddEffect(effect, null);
             }
         } finally {
@@ -71,6 +72,7 @@ public final class SharedEffects {
         try {
             for (var player : participants) {
                 if (player == source || !SharedVitalsState.eligible(player) || !player.isAlive()) continue;
+                // It also refreshes modifiers/packets when this same instance mutated in place.
                 if (effect == null) player.removeEffect(type);
                 else player.forceAddEffect(effect, null);
             }

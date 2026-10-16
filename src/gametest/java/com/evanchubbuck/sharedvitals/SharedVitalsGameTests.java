@@ -533,6 +533,122 @@ public final class SharedVitalsGameTests {
     }
 
     @GameTest
+    public void reloadedEqualEffectsReplacePrivateInstancesOnJoin(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.REGENERATION, 50));
+            var ops = RegistryOps.create(JsonOps.INSTANCE, f.server.registryAccess());
+            var saved = SharedVitalsState.CODEC.encodeStart(ops, f.state).getOrThrow();
+            var loaded = SharedVitalsState.CODEC.parse(ops, saved).getOrThrow();
+            f.state.leave(a);
+            f.state.leave(b);
+            var privateA = a.getEffect(MobEffects.REGENERATION);
+            var privateB = b.getEffect(MobEffects.REGENERATION);
+            helper.assertTrue(privateA != privateB && privateA.equals(privateB),
+                    "Reload begins with separate but equal player effects");
+            f.server.getDataStorage().set(SharedVitalsState.TYPE, loaded);
+            loaded.join(a);
+            loaded.join(b);
+            var shared = a.getEffect(MobEffects.REGENERATION);
+            helper.assertTrue(shared != privateA && shared != privateB && shared == b.getEffect(MobEffects.REGENERATION),
+                    "Joining replaces equal private instances with the group's actual instance");
+            helper.assertTrue(loaded.isSharedEffect(a, shared) && loaded.isSharedEffect(b, shared),
+                    "Both reloaded players use the shared clock");
+            for (var mode : List.of(GameType.CREATIVE, GameType.SPECTATOR)) {
+                b.setGameMode(mode);
+                var detached = b.getEffect(MobEffects.REGENERATION);
+                helper.assertTrue(detached != shared && detached.equals(shared), "Exclusion creates an independent equal instance");
+                b.setGameMode(GameType.SURVIVAL);
+                helper.assertTrue(b.getEffect(MobEffects.REGENERATION) == shared, "Rejoining replaces the equal detached instance");
+            }
+            a.setHealth(10);
+            a.getFoodData().setFoodLevel(0);
+            b.doTick();
+            a.doTick();
+            helper.assertValueEqual(a.getHealth(), 11F, "Reloaded players apply one regeneration pulse");
+            helper.assertValueEqual(shared.getDuration(), 49, "Reloaded players advance the clock once");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void sharedAmplifierChangesRefreshModifiersAndPackets(GameTestHelper helper) {
+        var types = List.of(MobEffects.SPEED, MobEffects.STRENGTH, MobEffects.ABSORPTION);
+        var attributes = List.of(Attributes.MOVEMENT_SPEED, Attributes.ATTACK_DAMAGE, Attributes.MAX_ABSORPTION);
+        for (int index = 0; index < types.size(); index++) {
+            try (var f = new Fixture(helper)) {
+                var a = f.player();
+                var b = f.player();
+                var type = types.get(index);
+                var attribute = attributes.get(index);
+                a.addEffect(new MobEffectInstance(type, 100));
+                var weakValue = b.getAttributeValue(attribute);
+                f.takePackets(b);
+                a.addEffect(new MobEffectInstance(type, 2, 1));
+                helper.assertTrue(a.getEffect(type) == b.getEffect(type), "An upgrade mutates the common instance");
+                helper.assertTrue(b.getAttributeValue(attribute) > weakValue, "The teammate's actual attribute is upgraded");
+                helper.assertValueEqual(b.getAttributeValue(attribute), a.getAttributeValue(attribute),
+                        "Both players' actual attributes match after upgrading");
+                type.value().createModifiers(1, (modifiedAttribute, modifier) -> {
+                    helper.assertValueEqual(b.getAttribute(modifiedAttribute).getModifier(modifier.id()).amount(), modifier.amount(),
+                            "The teammate's native effect modifier has the new amplifier");
+                });
+                helper.assertTrue(f.takePackets(b).stream().anyMatch(packet -> packet instanceof ClientboundUpdateMobEffectPacket effect
+                                && effect.getEntityId() == b.getId() && effect.getEffect().equals(type) && effect.getEffectAmplifier() == 1),
+                        "The teammate receives the upgraded amplifier packet");
+                a.doTick();
+                b.doTick();
+                f.state.tick(f.server);
+                a.doTick();
+                b.doTick();
+                helper.assertValueEqual(b.getAttributeValue(attribute), weakValue,
+                        "Promotion of the hidden weaker effect restores its actual attribute value");
+                type.value().createModifiers(0, (modifiedAttribute, modifier) -> {
+                    helper.assertValueEqual(b.getAttribute(modifiedAttribute).getModifier(modifier.id()).amount(), modifier.amount(),
+                            "The native modifier also downgrades with the hidden effect");
+                });
+                helper.assertTrue(f.takePackets(b).stream().anyMatch(packet -> packet instanceof ClientboundUpdateMobEffectPacket effect
+                                && effect.getEntityId() == b.getId() && effect.getEffect().equals(type) && effect.getEffectAmplifier() == 0),
+                        "The teammate receives the hidden-effect downgrade packet");
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void timedAbsorptionRemovalPreservesRemainingDirectCapacity(GameTestHelper helper) {
+        for (var removal : List.of("remove", "milk", "expire")) {
+            for (double baseCapacity : List.of(20D, 2D)) {
+                try (var f = new Fixture(helper)) {
+                    var a = f.player();
+                    var b = f.player();
+                    a.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(baseCapacity);
+                    a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 1));
+                    a.setAbsorptionAmount(baseCapacity == 20D ? 8 : 6);
+                    if (removal.equals("remove")) a.removeEffect(MobEffects.ABSORPTION);
+                    else if (removal.equals("milk")) new ItemStack(Items.MILK_BUCKET).finishUsingItem(a.level(), a);
+                    else a.doTick();
+                    float remaining = baseCapacity == 20D ? 8 : 2;
+                    for (var player : List.of(a, b)) {
+                        helper.assertFalse(player.hasEffect(MobEffects.ABSORPTION), "The timed effect is removed via " + removal);
+                        helper.assertValueEqual(player.getAbsorptionAmount(), remaining,
+                                "Post-removal absorption is preserved within remaining vanilla capacity via " + removal);
+                    }
+                    var late = f.player();
+                    helper.assertValueEqual(late.getAbsorptionAmount(), remaining, "A late join inherits the surviving direct grant");
+                    b.hurtServer(b.level(), b.damageSources().generic(), 3);
+                    helper.assertValueEqual(a.getAbsorptionAmount(), Math.max(0F, remaining - 3),
+                            "Damage consumes the remaining shared absorption once");
+                    helper.assertValueEqual(a.getHealth(), remaining >= 3 ? 20F : 19F,
+                            "Only unabsorbed damage reaches the shared health pool");
+                }
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
     public void foodAndExhaustionCombine(GameTestHelper helper) {
         try (var f = new Fixture(helper)) {
             var a = f.player();
