@@ -11,19 +11,28 @@ import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
+import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
+import net.minecraft.network.protocol.game.ClientboundHurtAnimationPacket;
+import net.minecraft.network.protocol.game.ClientboundSoundPacket;
+import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
+import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
 import net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.CommonListenerCookie;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.server.permissions.PermissionSet;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.food.FoodProperties;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -68,6 +77,7 @@ public final class SharedVitalsGameTests {
             var a = f.player();
             var b = f.player();
             a.hurtServer(a.level(), a.damageSources().generic(), 4);
+            helper.assertValueEqual(b.invulnerableTime, 0, "Shared feedback does not grant damage immunity");
             b.hurtServer(b.level(), b.damageSources().generic(), 5);
             helper.assertValueEqual(a.getHealth(), 11F, "Hits on different players in one tick accumulate");
             helper.assertValueEqual(b.getHealth(), 11F, "No stale health overwrites a hit");
@@ -76,15 +86,137 @@ public final class SharedVitalsGameTests {
     }
 
     @GameTest
-    public void armorAndAbsorptionApplyToVictimOnly(GameTestHelper helper) {
+    public void sharedHitSendsHurtFeedbackWithoutAnotherHit(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            var observer = f.player();
+            observer.setGameMode(GameType.CREATIVE);
+            b.setPos(a.position());
+            observer.setPos(a.position());
+            var armor = new ItemStack(Items.DIAMOND_CHESTPLATE);
+            b.setItemSlot(EquipmentSlot.CHEST, armor);
+            var movement = b.getDeltaMovement();
+            f.takePackets(a);
+            f.takePackets(b);
+            f.takePackets(observer);
+            a.hurtServer(a.level(), a.damageSources().generic(), 6);
+            var packets = f.takePackets(b);
+            helper.assertValueEqual(packets.stream().filter(packet -> packet instanceof ClientboundDamageEventPacket event
+                    && event.entityId() == b.getId()).count(), 1L, "Teammate receives one vanilla damage feedback event");
+            helper.assertValueEqual(packets.stream().filter(packet -> packet instanceof ClientboundHurtAnimationPacket event
+                    && event.id() == b.getId() && event.yaw() == a.getHurtDir()).count(), 1L,
+                    "Teammate receives one camera flinch with the victim's hurt direction");
+            var victimPackets = f.takePackets(a);
+            helper.assertValueEqual(victimPackets.stream().filter(packet -> packet instanceof ClientboundDamageEventPacket event
+                    && event.entityId() == a.getId()).count(), 1L, "The original victim's feedback is not duplicated");
+            helper.assertValueEqual(victimPackets.stream().filter(packet -> packet instanceof ClientboundSoundPacket sound
+                    && sound.getSound().value() == SoundEvents.PLAYER_HURT).count(), 1L,
+                    "Nearby players hear the teammate's hurt sound through the server sound path");
+            helper.assertValueEqual(f.takePackets(observer).stream().filter(packet -> packet instanceof ClientboundSoundPacket sound
+                    && sound.getSound().value() == SoundEvents.PLAYER_HURT).count(), 2L,
+                    "An observer hears the actual victim and the teammate once each");
+            helper.assertValueEqual(b.getHealth(), 14F, "Shared health damage is applied exactly once");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 0F, "Feedback does not generate absorption");
+            helper.assertValueEqual(armor.getDamageValue(), 0, "Feedback does not damage teammate armor");
+            helper.assertValueEqual(b.invulnerableTime, 0, "Feedback does not suppress a later real hit");
+            helper.assertValueEqual(b.hurtTime, 10, "Server also records the hurt animation");
+            helper.assertValueEqual(b.getDeltaMovement(), movement, "Visual feedback does not move teammates");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void healthSynchronizationDoesNotSendHurtFeedback(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            a.setHealth(12);
+            var b = f.player();
+            a.heal(2);
+            b.getAttribute(Attributes.MAX_HEALTH).setBaseValue(10);
+            f.state.tick(f.server);
+            b.setGameMode(GameType.SPECTATOR);
+            b.setGameMode(GameType.SURVIVAL);
+            for (var player : List.of(a, b)) {
+                helper.assertFalse(f.takePackets(player).stream().anyMatch(packet ->
+                                packet instanceof ClientboundDamageEventPacket || packet instanceof ClientboundHurtAnimationPacket),
+                        "Joins, setters, healing, health caps, and mode changes do not imitate a hit");
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void absorbedHitsSendFeedbackButRejectedHitsDoNot(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(20);
+            a.setAbsorptionAmount(4);
+            f.takePackets(b);
+            a.hurtServer(a.level(), a.damageSources().generic(), 4);
+            helper.assertValueEqual(f.takePackets(b).stream().filter(packet -> packet instanceof ClientboundDamageEventPacket event
+                    && event.entityId() == b.getId()).count(), 1L, "A hit on shared golden hearts also sends hurt feedback");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 0F, "The golden hearts are consumed for everyone");
+            helper.assertFalse(a.hurtServer(a.level(), a.damageSources().generic(), 4), "Cooldown rejects the next hit");
+            a.invulnerableTime = 0;
+            helper.assertFalse(a.hurtServer(a.level(), a.damageSources().generic(), 0), "Zero damage is rejected");
+            helper.assertValueEqual(b.getHealth(), 20F, "These hits do not lower the shared pool");
+            helper.assertFalse(f.takePackets(b).stream().anyMatch(packet ->
+                            packet instanceof ClientboundDamageEventPacket event && event.entityId() == b.getId()
+                            || packet instanceof ClientboundHurtAnimationPacket animation && animation.id() == b.getId()),
+                    "Rejected hits send no additional shared hurt feedback");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void hurtFeedbackCrossesDimensionsAndExcludesNonparticipants(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            var creative = f.player();
+            var spectator = f.player();
+            creative.setGameMode(GameType.CREATIVE);
+            spectator.setGameMode(GameType.SPECTATOR);
+            b.teleportTo(f.server.getLevel(net.minecraft.world.level.Level.NETHER), 0, 90, 0, java.util.Set.of(), 0, 0, false);
+            for (var player : List.of(a, b, creative, spectator)) f.takePackets(player);
+            a.hurtServer(a.level(), a.damageSources().playerAttack(creative), 3);
+            var packets = f.takePackets(b);
+            var feedback = packets.stream().filter(packet -> packet instanceof ClientboundDamageEventPacket event
+                            && event.entityId() == b.getId()).map(ClientboundDamageEventPacket.class::cast).toList();
+            helper.assertValueEqual(feedback.size(), 1, "The teammate in another dimension receives hurt feedback");
+            helper.assertValueEqual(feedback.getFirst().sourceType(), a.damageSources().playerAttack(creative).typeHolder(),
+                    "Damage type is preserved for the vanilla hurt sound");
+            helper.assertValueEqual(feedback.getFirst().sourceCauseId(), -1, "Remote attacker IDs are omitted");
+            helper.assertValueEqual(feedback.getFirst().sourceDirectId(), -1, "Remote direct entity IDs are omitted");
+            helper.assertTrue(feedback.getFirst().sourcePosition().isEmpty(), "Remote source coordinates are omitted");
+            helper.assertTrue(packets.stream().anyMatch(packet -> packet instanceof ClientboundHurtAnimationPacket event
+                    && event.id() == b.getId()), "Camera feedback also crosses dimensions");
+            helper.assertValueEqual(b.getHealth(), 17F, "Cross-dimension damage still applies once");
+            for (var player : List.of(creative, spectator)) {
+                helper.assertValueEqual(player.getHealth(), 20F, "Excluded players keep their health");
+                helper.assertValueEqual(player.hurtTime, 0, "Excluded players do not animate a shared hit");
+                helper.assertFalse(f.takePackets(player).stream().anyMatch(packet ->
+                                packet instanceof ClientboundDamageEventPacket event && event.entityId() == player.getId()
+                                || packet instanceof ClientboundHurtAnimationPacket animation && animation.id() == player.getId()),
+                        "Excluded players receive no hurt feedback for themselves");
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void victimArmorProtectsTheSharedPools(GameTestHelper helper) {
         try (var f = new Fixture(helper)) {
             var a = f.player();
             var b = f.player();
             a.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(20);
             a.setAbsorptionAmount(4);
             a.hurtServer(a.level(), a.damageSources().generic(), 6);
-            helper.assertValueEqual(a.getHealth(), 18F, "Personal absorption intercepts four damage");
-            helper.assertValueEqual(b.getHealth(), 18F, "Only health damage is shared");
+            helper.assertValueEqual(a.getHealth(), 18F, "Shared absorption intercepts four damage");
+            helper.assertValueEqual(b.getHealth(), 18F, "Remaining health damage is shared");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 0F, "Absorption is consumed once for the group");
             a.invulnerableTime = 0;
             a.setItemSlot(EquipmentSlot.CHEST, new ItemStack(Items.DIAMOND_CHESTPLATE));
             a.doTick(); // Vanilla installs equipment attribute modifiers during the entity tick.
@@ -92,6 +224,310 @@ public final class SharedVitalsGameTests {
             a.hurtServer(a.level(), a.damageSources().mobAttack(b), 6);
             helper.assertTrue(a.getHealth() > 12F, "Victim's armor reduces health damage");
             helper.assertValueEqual(a.getHealth(), b.getHealth(), "Armor reduction is applied once");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void goldenAppleSharesAbsorptionAndVisibleEffects(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            new ItemStack(Items.GOLDEN_APPLE).finishUsingItem(a.level(), a);
+            helper.assertValueEqual(a.getAbsorptionAmount(), 4F, "A golden apple supplies two golden hearts");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 4F, "The same golden hearts reach the teammate");
+            helper.assertValueEqual(a.getEffect(MobEffects.ABSORPTION).getDuration(),
+                    b.getEffect(MobEffects.ABSORPTION).getDuration(), "The absorption lifetime is shared");
+            helper.assertTrue(a.hasEffect(MobEffects.REGENERATION), "The eater receives vanilla regeneration");
+            helper.assertTrue(b.hasEffect(MobEffects.REGENERATION), "Regeneration is visible on the teammate too");
+            a.addEffect(new MobEffectInstance(MobEffects.POISON, 100));
+            b.addEffect(new MobEffectInstance(MobEffects.SPEED, 100));
+            helper.assertTrue(b.hasEffect(MobEffects.POISON) && a.hasEffect(MobEffects.SPEED),
+                    "Both harmful and beneficial effects are shared");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void hitsConsumeSharedAbsorptionOnceAcrossDimensions(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 1200));
+            b.teleportTo(f.server.getLevel(net.minecraft.world.level.Level.NETHER), 0, 90, 0, java.util.Set.of(), 0, 0, false);
+            b.hasChangedDimension();
+            b.connection.handleAcceptPlayerLoad(new ServerboundPlayerLoadedPacket());
+            a.hurtServer(a.level(), a.damageSources().generic(), 2);
+            helper.assertValueEqual(a.getHealth(), 20F, "Golden hearts protect shared normal health");
+            helper.assertValueEqual(a.getAbsorptionAmount(), 2F, "The first hit consumes two absorption points");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 2F, "The remaining absorption reaches another dimension");
+            helper.assertValueEqual(b.invulnerableTime, 0, "Shared feedback does not suppress the other player's hit");
+            helper.assertTrue(b.hurtServer(b.level(), b.damageSources().generic(), 5), "The second player receives a real hit");
+            helper.assertValueEqual(a.getAbsorptionAmount(), 0F, "The second hit exhausts the shared absorption");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 0F, "Both players lose the exhausted golden hearts");
+            helper.assertValueEqual(a.getHealth(), 17F, "Only the three remaining damage points reach shared health");
+            helper.assertValueEqual(b.getHealth(), 17F, "Damage is not applied again to teammates");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void absorptionRefreshAndHiddenDowngradeStayShared(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 100));
+            a.hurtServer(a.level(), a.damageSources().generic(), 2);
+            b.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 2, 1));
+            helper.assertValueEqual(a.getAbsorptionAmount(), 8F, "A stronger absorption grant refreshes the shared supply");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 8F, "Refreshing does not add a second copy of the supply");
+            a.doTick();
+            b.doTick();
+            f.state.tick(f.server);
+            a.doTick();
+            b.doTick();
+            for (var player : List.of(a, b)) {
+                helper.assertTrue(player.hasEffect(MobEffects.ABSORPTION), "The hidden weaker absorption effect is retained");
+                helper.assertValueEqual(player.getEffect(MobEffects.ABSORPTION).getAmplifier(), 0,
+                        "The stronger effect downgrades for the whole group");
+                helper.assertValueEqual(player.getAbsorptionAmount(), 4F, "Remaining golden hearts fit the weaker capacity");
+            }
+            a.removeEffect(MobEffects.ABSORPTION);
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 2, 1));
+            b.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 100));
+            f.state.tick(f.server);
+            a.doTick();
+            b.doTick();
+            f.state.tick(f.server);
+            a.doTick();
+            b.doTick();
+            helper.assertTrue(a.hasEffect(MobEffects.ABSORPTION) && b.hasEffect(MobEffects.ABSORPTION),
+                    "A weaker effect added behind a stronger one is shared as a hidden fallback");
+            helper.assertValueEqual(a.getEffect(MobEffects.ABSORPTION).getAmplifier(), 0,
+                    "The hidden fallback also works when the weaker effect was added second");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void milkAndExpiryClearSharedEffects(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 100));
+            a.addEffect(new MobEffectInstance(MobEffects.SPEED, 100));
+            new ItemStack(Items.MILK_BUCKET).finishUsingItem(b.level(), b);
+            for (var player : List.of(a, b)) {
+                helper.assertValueEqual(player.getAbsorptionAmount(), 0F, "One player's milk clears the shared golden hearts");
+                helper.assertFalse(player.hasEffect(MobEffects.ABSORPTION), "Milk removes the shared absorption effect");
+            }
+            helper.assertFalse(a.hasEffect(MobEffects.SPEED), "Milk clears the shared status effects too");
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 2));
+            f.server.getPlayerList().remove(a);
+            b.doTick();
+            f.state.tick(f.server);
+            b.doTick();
+            helper.assertValueEqual(b.getAbsorptionAmount(), 0F, "Absorption expires after its original recipient disconnects");
+            helper.assertFalse(b.hasEffect(MobEffects.ABSORPTION), "The shared duration actually expires");
+            var late = f.player();
+            helper.assertValueEqual(late.getAbsorptionAmount(), 0F, "A late join cannot revive expired absorption");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void joinsAndModeChangesAdoptRemainingAbsorption(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 100));
+            a.hurtServer(a.level(), a.damageSources().generic(), 1);
+            a.doTick();
+            b.doTick();
+            var duration = a.getEffect(MobEffects.ABSORPTION).getDuration();
+            var late = f.player();
+            helper.assertValueEqual(late.getAbsorptionAmount(), 3F, "Joining does not refill consumed golden hearts");
+            helper.assertValueEqual(late.getEffect(MobEffects.ABSORPTION).getDuration(), duration,
+                    "Joining preserves the remaining absorption duration");
+            b.setGameMode(GameType.CREATIVE);
+            b.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 200, 2));
+            helper.assertValueEqual(a.getAbsorptionAmount(), 3F, "Creative absorption grants do not enter the pool");
+            a.invulnerableTime = 0;
+            a.hurtServer(a.level(), a.damageSources().generic(), 1);
+            helper.assertValueEqual(b.getAbsorptionAmount(), 12F, "Creative players do not consume shared absorption");
+            b.setGameMode(GameType.SURVIVAL);
+            helper.assertValueEqual(b.getAbsorptionAmount(), 2F, "Returning to survival adopts the spent pool");
+            helper.assertValueEqual(b.getEffect(MobEffects.ABSORPTION).getAmplifier(), 0,
+                    "Returning also adopts the shared effect strength");
+            b.setGameMode(GameType.SPECTATOR);
+            a.removeEffect(MobEffects.ABSORPTION);
+            helper.assertValueEqual(b.getAbsorptionAmount(), 2F, "Spectators are detached from absorption changes");
+            helper.assertValueEqual(late.getAbsorptionAmount(), 0F, "Active players share effect removal");
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 100));
+            a.invulnerableTime = 0;
+            a.hurtServer(a.level(), a.damageSources().generic(), 1);
+            f.server.getPlayerList().remove(a);
+            f.server.getPlayerList().remove(late);
+            var returning = f.player();
+            helper.assertValueEqual(returning.getAbsorptionAmount(), 3F, "An empty server retains the spent absorption pool");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void directAbsorptionGrantsPreservePersonalBaseAttributes(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(20);
+            a.setAbsorptionAmount(8);
+            helper.assertValueEqual(b.getAbsorptionAmount(), 8F, "Absorption without a status effect is also shared");
+            helper.assertValueEqual(b.getAttribute(Attributes.MAX_ABSORPTION).getBaseValue(), 0D,
+                    "Sharing does not change the teammate's base attribute");
+            helper.assertFalse(b.hasEffect(MobEffects.ABSORPTION), "A direct grant does not invent a timed status effect");
+            a.setAbsorptionAmount(0);
+            helper.assertValueEqual(b.getMaxAbsorption(), 0F, "Temporary shared capacity is removed when the pool empties");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void legacyWorldSeedsAbsorptionFromExistingPlayer(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 300));
+            a.hurtServer(a.level(), a.damageSources().generic(), 1);
+            var ops = RegistryOps.create(JsonOps.INSTANCE, f.server.registryAccess());
+            var encoded = SharedVitalsState.CODEC.encodeStart(ops, f.state).getOrThrow().getAsJsonObject();
+            for (var field : List.of("absorptionInitialized", "absorption", "absorptionEffect", "effects")) encoded.remove(field);
+            var loaded = SharedVitalsState.CODEC.parse(ops, encoded).getOrThrow();
+            f.state.leave(a);
+            f.server.getDataStorage().set(SharedVitalsState.TYPE, loaded);
+            loaded.join(a);
+            var b = f.player();
+            helper.assertValueEqual(a.getAbsorptionAmount(), 3F, "Upgrading preserves an existing player's spent absorption");
+            helper.assertValueEqual(b.getAbsorptionAmount(), 3F, "The upgraded pool shares that remaining absorption");
+            helper.assertValueEqual(b.getEffect(MobEffects.ABSORPTION).getDuration(), 300,
+                    "Upgrading also preserves the absorption lifetime");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void effectIconsAndDurationsAreSharedWithoutMultiplyingTicks(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            var c = f.player();
+            a.setHealth(10);
+            a.getFoodData().setFoodLevel(0);
+            f.takePackets(b);
+            c.addEffect(new MobEffectInstance(MobEffects.REGENERATION, 50));
+            helper.assertTrue(f.takePackets(b).stream().anyMatch(packet -> packet instanceof ClientboundUpdateMobEffectPacket effect
+                            && effect.getEntityId() == b.getId() && effect.getEffect().equals(MobEffects.REGENERATION)
+                            && effect.effectShowsIcon() && effect.getEffectDurationTicks() == 50),
+                    "The teammate receives the native visible regeneration icon and duration");
+            // Tick followers first to prove their displayed effect cannot apply healing.
+            c.doTick();
+            b.doTick();
+            helper.assertValueEqual(a.getHealth(), 10F, "Followers do not apply extra regeneration");
+            a.doTick();
+            for (var player : List.of(a, b, c)) {
+                helper.assertValueEqual(player.getHealth(), 11F, "Three players receive one regeneration heal");
+                helper.assertValueEqual(player.getEffect(MobEffects.REGENERATION).getDuration(), 49,
+                        "The common duration decreases once instead of once per player");
+            }
+            helper.assertTrue(a.getEffect(MobEffects.REGENERATION) == b.getEffect(MobEffects.REGENERATION),
+                    "Players reference one shared effect instance");
+            b.removeEffect(MobEffects.REGENERATION);
+            helper.assertFalse(a.hasEffect(MobEffects.REGENERATION) || c.hasEffect(MobEffects.REGENERATION),
+                    "Removing an effect clears it for the group");
+            helper.assertTrue(f.takePackets(a).stream().anyMatch(packet -> packet instanceof ClientboundRemoveMobEffectPacket effect
+                    && effect.entityId() == a.getId() && effect.effect().equals(MobEffects.REGENERATION)),
+                    "The removal also clears the native effect icon");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void poisonWitherAndHungerRunOnceForTheGroup(GameTestHelper helper) {
+        for (var effect : List.of(MobEffects.POISON, MobEffects.WITHER)) {
+            try (var f = new Fixture(helper)) {
+                var a = f.player();
+                var b = f.player();
+                var c = f.player();
+                a.setHealth(10);
+                a.getFoodData().setFoodLevel(0);
+                a.addEffect(new MobEffectInstance(effect, effect.equals(MobEffects.POISON) ? 25 : 40));
+                a.doTick();
+                b.doTick();
+                c.doTick();
+                helper.assertValueEqual(a.getHealth(), 9F, "The harmful effect applies one point to the shared pool");
+                helper.assertValueEqual(c.getHealth(), 9F, "A third participant does not triple damage");
+            }
+        }
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            var c = f.player();
+            a.addEffect(new MobEffectInstance(MobEffects.HUNGER, 100));
+            a.doTick();
+            b.doTick();
+            c.doTick();
+            helper.assertValueEqual(FoodSnapshot.capture(a.getFoodData()).exhaustion(), 0.005F,
+                    "Hunger adds exhaustion once regardless of participant count");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void passiveEffectsApplyNormallyToEveryPlayer(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            var baseSpeed = a.getAttributeValue(Attributes.MOVEMENT_SPEED);
+            a.addEffect(new MobEffectInstance(MobEffects.SPEED, 200, 1));
+            var speed = a.getAttributeValue(Attributes.MOVEMENT_SPEED);
+            helper.assertTrue(Math.abs(speed / baseSpeed - 1.4D) < 0.00001D, "Speed II has its vanilla forty-percent bonus");
+            helper.assertValueEqual(b.getAttributeValue(Attributes.MOVEMENT_SPEED), speed, "The teammate receives that bonus too");
+            b.addEffect(new MobEffectInstance(MobEffects.SPEED, 200, 1));
+            helper.assertValueEqual(a.getAttributeValue(Attributes.MOVEMENT_SPEED), speed, "Sharing/refreshing does not stack modifiers");
+            a.addEffect(new MobEffectInstance(MobEffects.FIRE_RESISTANCE, 200));
+            helper.assertFalse(b.hurtServer(b.level(), b.damageSources().inFire(), 5), "Fire resistance protects the teammate");
+            helper.assertValueEqual(a.getHealth(), 20F, "The resisted hit does not damage the shared pool");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void effectJoinsAndLeaderChangesPreserveOneClock(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.setHealth(10);
+            a.getFoodData().setFoodLevel(0);
+            a.addEffect(new MobEffectInstance(MobEffects.REGENERATION, 51));
+            a.doTick();
+            b.doTick();
+            var late = f.player();
+            helper.assertValueEqual(late.getEffect(MobEffects.REGENERATION).getDuration(), 50,
+                    "A late join inherits the remaining duration without refreshing it");
+            a.setGameMode(GameType.CREATIVE);
+            var isolated = a.getEffect(MobEffects.REGENERATION);
+            helper.assertTrue(isolated != b.getEffect(MobEffects.REGENERATION), "Excluded players detach from the shared clock");
+            f.state.tick(f.server);
+            b.doTick();
+            late.doTick();
+            helper.assertValueEqual(b.getHealth(), 11F, "A replacement leader applies the next heal once");
+            helper.assertValueEqual(isolated.getDuration(), 50, "Group ticking does not advance an excluded player's effect");
+            a.setGameMode(GameType.SURVIVAL);
+            helper.assertValueEqual(a.getEffect(MobEffects.REGENERATION).getDuration(), 49, "Returning adopts the group's clock");
+            f.server.getPlayerList().remove(a);
+            f.server.getPlayerList().remove(b);
+            f.server.getPlayerList().remove(late);
+            var returning = f.player();
+            helper.assertValueEqual(returning.getEffect(MobEffects.REGENERATION).getDuration(), 49,
+                    "An empty server preserves the group's effect duration");
         }
         helper.succeed();
     }
@@ -238,6 +674,9 @@ public final class SharedVitalsGameTests {
             helper.assertValueEqual(a.getHealth(), 1F, "Totem leaves one shared health point");
             helper.assertValueEqual(b.getHealth(), 1F, "Totem recovery reaches the group");
             helper.assertTrue(a.getOffhandItem().isEmpty(), "The victim's totem is consumed");
+            helper.assertValueEqual(b.getAbsorptionAmount(), a.getAbsorptionAmount(), "Totem absorption protects the group");
+            helper.assertTrue(a.hasEffect(MobEffects.REGENERATION) && b.hasEffect(MobEffects.REGENERATION),
+                    "The totem's status effects are visible to the whole group");
         }
         helper.succeed();
     }
@@ -257,6 +696,8 @@ public final class SharedVitalsGameTests {
             helper.assertValueEqual(nextA.getHealth(), 20F, "First respawn opens a full health pool");
             helper.assertValueEqual(nextA.getFoodData().getFoodLevel(), 20, "First respawn resets food");
             helper.assertValueEqual(nextA.getFoodData().getSaturationLevel(), 5F, "Respawn restores vanilla saturation");
+            helper.assertValueEqual(nextA.getAbsorptionAmount(), 0F, "A new life starts without golden hearts");
+            helper.assertFalse(nextA.hasEffect(MobEffects.ABSORPTION), "A new life does not retain the old absorption effect");
             nextA.setHealth(12);
             nextA.getFoodData().setFoodLevel(15);
             var nextB = f.respawn(b);
@@ -305,8 +746,13 @@ public final class SharedVitalsGameTests {
             a.getFoodData().setFoodLevel(9);
             a.getFoodData().setSaturation(3);
             a.causeFoodExhaustion(2);
+            a.addEffect(new MobEffectInstance(MobEffects.ABSORPTION, 600, 2));
+            a.addEffect(new MobEffectInstance(MobEffects.SPEED, 200, 1));
+            a.addEffect(new MobEffectInstance(MobEffects.REGENERATION, 51));
+            a.hurtServer(a.level(), a.damageSources().generic(), 3);
             ((FoodDataAccessor) a.getFoodData()).sharedVitals$setTimer(42);
             var snapshot = FoodSnapshot.capture(a.getFoodData());
+            f.state.captureAbsorptionEffect();
             var directory = Files.createTempDirectory("shared-vitals-save-test");
             try {
                 try (var storage = new SavedDataStorage(directory, DataFixers.getDataFixer(), f.server.registryAccess())) {
@@ -324,6 +770,15 @@ public final class SharedVitalsGameTests {
                 helper.assertValueEqual(b.getHealth(), 7F, "Saved health survives a new storage instance");
                 helper.assertValueEqual(FoodSnapshot.capture(b.getFoodData()), snapshot,
                         "Food, saturation, exhaustion and timer survive a disk reload");
+                helper.assertValueEqual(b.getAbsorptionAmount(), 9F, "Spent absorption survives a disk reload without refilling");
+                helper.assertValueEqual(b.getEffect(MobEffects.ABSORPTION).getDuration(), 600,
+                        "The absorption lifetime survives a disk reload");
+                helper.assertValueEqual(b.getEffect(MobEffects.ABSORPTION).getAmplifier(), 2,
+                        "The absorption strength survives a disk reload");
+                helper.assertValueEqual(b.getEffect(MobEffects.SPEED).getDuration(), 200,
+                        "Other shared status effects survive a real saved-data reload");
+                helper.assertValueEqual(b.getEffect(MobEffects.REGENERATION).getDuration(), 51,
+                        "Reloading does not refresh the regeneration timer");
             } finally {
                 try (var paths = Files.walk(directory)) {
                     for (var path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
@@ -512,6 +967,7 @@ public final class SharedVitalsGameTests {
             a.getFoodData().setFoodLevel(4);
             var original = SharedVitalsState.CODEC.encodeStart(JsonOps.INSTANCE, f.state).getOrThrow().getAsJsonObject();
             original.remove("waitingForTransfer");
+            for (var field : List.of("absorptionInitialized", "absorption", "absorptionEffect", "effects")) original.remove(field);
             var loaded = SharedVitalsState.CODEC.parse(JsonOps.INSTANCE, original).getOrThrow();
             f.state.leave(a);
             f.server.getDataStorage().set(SharedVitalsState.TYPE, loaded);
@@ -677,6 +1133,14 @@ public final class SharedVitalsGameTests {
                 }
             }
             return count;
+        }
+
+        List<Object> takePackets(ServerPlayer player) {
+            var packets = new ArrayList<>();
+            var channel = channels.get(players.indexOf(player));
+            Object packet;
+            while ((packet = channel.readOutbound()) != null) packets.add(packet);
+            return packets;
         }
 
         @Override

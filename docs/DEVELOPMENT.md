@@ -33,6 +33,29 @@ death, real player respawns, dimensions, maximum health, and saved-data disk
 reloads. Results are written to `build/gametest-results.xml`. Test code is not
 included in the installable mod JAR.
 
+Hurt feedback tests inspect outbound vanilla damage-event and camera-animation
+packets, including cross-dimension delivery, excluded game modes, absorption,
+rejected hits, and ordinary health synchronization. They also check that feedback
+does not apply extra damage, damage teammate armor, or grant damage immunity.
+Absorption is consumed once by the actual hit. In two-client playtesting, check
+the red flash, hurt sound, and camera flinch on both clients and when observing
+a teammate. Physical knockback applies
+only to the actual victim.
+
+Absorption and all status effects are persisted shared state. Test golden apples, absorption-only hits,
+spillover into health, same-tick hits, stronger/hidden absorption effects, milk,
+expiration, cross-dimension joins, mode changes, death/respawn, and saved-data
+reloads. Joining or restoring an absorption effect must not refill consumed hearts.
+
+All participants reference one instance of each status effect. Only the first
+living participant ticks it, once per server tick; others receive its vanilla
+attributes, particles, icon, amplifier, and remaining duration. Regression tests
+check native icon/removal packets, three-player regeneration/poison/wither/hunger
+rates, normal speed/fire-resistance behavior, hidden effect downgrades, and
+join/leader/creative-mode transitions. Tick-dependent effect logic uses the same
+participant's vanilla context as shared food. For direct repeated player-tick
+tests, call the state's server-start tick between simulated ticks.
+
 Linked Hardcore coverage checks the opt-in command and permissions, configuration
 persistence/failure handling, original-death-only handling, totems, late arrivals,
 proxy respawns, ended-run persistence, fresh-world initialization, and migration

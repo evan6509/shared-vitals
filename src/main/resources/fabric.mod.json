@@ -3,7 +3,7 @@
   "id": "shared_vitals",
   "version": "${version}",
   "name": "Shared Vitals",
-  "description": "Survival and adventure players share health, hunger, and death across the server.",
+  "description": "Survival and adventure players share health, hunger, absorption, status effects, and death across the server.",
   "authors": ["Evan Chubbuck"],
   "license": "MIT",
   "environment": "*",
