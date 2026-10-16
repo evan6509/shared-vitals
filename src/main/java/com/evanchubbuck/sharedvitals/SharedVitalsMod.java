@@ -30,7 +30,11 @@ public final class SharedVitalsMod implements ModInitializer {
             }
         });
         ServerTickEvents.START_SERVER_TICK.register(server -> SharedVitalsState.get(server).tick(server));
-        ServerTickEvents.END_SERVER_TICK.register(server -> SharedVitalsState.get(server).setDirty());
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            var state = SharedVitalsState.get(server);
+            state.captureAbsorptionEffect();
+            state.setDirty();
+        });
         LOGGER.info("Shared Vitals initialized: survival and adventure players share health and hunger");
     }
 }

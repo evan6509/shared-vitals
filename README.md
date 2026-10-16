@@ -1,7 +1,7 @@
 # Shared Vitals
 
 A server-side Fabric mod for Minecraft 26.2 where survival and adventure players
-share health, hunger, and death across every dimension.
+share health, hunger, absorption hearts, status effects, and death across every dimension.
 
 **Status:** first gameplay implementation. Multiplayer client playtesting is still needed.
 
@@ -14,18 +14,35 @@ share health, hunger, and death across every dimension.
 
 - Damage and healing immediately update everyone's health. Hits on different
   players add together, including hits in the same tick.
+- A hit that lowers shared health or absorption also gives teammates the vanilla
+  hurt flash, hurt sound, and camera flinch, including across dimensions. This feedback does
+  not apply another hit, damage teammates' equipment, or give them damage immunity.
+  Physical knockback stays with the player who was hit. Healing, joins, and
+  maximum-health adjustments do not trigger shared hurt feedback.
 - Eating feeds everyone. Food level, saturation, and exhaustion are shared;
   everyone's activity contributes exhaustion. Food regeneration and starvation
   run once per server tick, regardless of player count.
-- Armor, absorption hearts, and status effects belong to individual players.
-  The health damage remaining after the victim's defenses is shared. A totem
-  held by the victim can save the group before death is confirmed.
+- Absorption (golden hearts) is one shared supply. Golden apples and other
+  absorption grants give everyone the same amount; damage to anyone consumes
+  that supply once before reducing shared health. The absorption effect's
+  strength, remaining duration, expiration, and removal are shared too. Late
+  joins and reconnects adopt the remaining hearts without refilling them.
+  Removing a timed absorption effect preserves hearts still supported by the
+  source player's remaining vanilla absorption capacity, including direct grants.
+- Status effects are shared, including their strength, remaining duration,
+  particles, and normal HUD/inventory icons. Each effect ticks once for the group:
+  regeneration, poison, wither, and hunger do not multiply with player count.
+  Passive benefits such as speed and fire resistance apply normally to everyone.
+  Milk or an effect-removal command on one participant removes the shared effects.
+- Armor belongs to individual players. The damage remaining after the victim's
+  defenses reaches the shared pools.
+  A totem held by the victim can save the group before death is confirmed.
 - When one player actually dies, all participating online players die. Other
   players' totems cannot stop that shared death. Ordinary death drops and
   `keepInventory` behavior still apply.
 - The first player to respawn starts the next life with full health, 20 food,
-  and 5 saturation. Later respawns join the current pool without refilling it.
-  Normal Minecraft respawn rules apply, including hardcore restrictions.
+  5 saturation, and no absorption. Later respawns join the current pool without
+  refilling it. Normal Minecraft respawn rules apply, including hardcore restrictions.
 - Late joins and reconnects adopt the current pool. Joining while the pool is
   dead causes death; respawning starts the next life. The pool persists when
   everyone disconnects and through normal world saves/restarts.
@@ -38,9 +55,11 @@ folder. No commands or setup are required.
 
 The shared health cap is the smallest maximum health among living participants,
 so health-changing effects cannot leave different players with different values.
-Food ticks and peaceful regeneration use the first living participant to join
-as their vanilla context (including dimension-specific gamerules). Player status
-effects tick individually. Teams and configurable sharing groups are not included.
+Food ticks, peaceful regeneration, and status-effect ticks use the first living
+participant to join as their vanilla context (including dimension-specific
+gamerules and location-dependent effect behavior). Shared effects have one clock;
+joining does not restart it, and it pauses while no participants are online.
+Teams and configurable sharing groups are not included.
 
 ## Linked Hardcore integration
 

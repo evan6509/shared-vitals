@@ -22,6 +22,7 @@ def verify(path: Path, expected_version: str) -> None:
             raise ValueError("Unexpected main entrypoint")
         jar.getinfo(entrypoint.replace(".", "/") + ".class")
         jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsState.class")
+        jar.getinfo("com/evanchubbuck/sharedvitals/SharedEffects.class")
         jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsCommands.class")
         jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsSettings.class")
         jar.getinfo("com/evanchubbuck/sharedvitals/SharedVitalsMixinPlugin.class")
@@ -34,7 +35,7 @@ def verify(path: Path, expected_version: str) -> None:
         if not mixins.get("required") or mixins.get("injectors", {}).get("defaultRequire") != 1:
             raise ValueError("Gameplay mixins must be required")
         expected_mixins = {
-            "FoodDataAccessor", "FoodDataMixin", "LivingEntityMixin", "PlayerAccessor",
+            "FoodDataAccessor", "FoodDataMixin", "LivingEntityMixin", "MobEffectInstanceAccessor", "MobEffectInstanceMixin", "PlayerAccessor",
             "ServerPlayerGameModeMixin", "ServerPlayerMixin",
         }
         if set(mixins.get("mixins", [])) != expected_mixins:
