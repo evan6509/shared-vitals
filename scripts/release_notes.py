@@ -6,7 +6,7 @@ import sys
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], text=True).strip()
+    return subprocess.check_output(["git", *args], text=True).rstrip("\n")
 
 
 def notes(version: str, repository: str, target: str, previous: str = "") -> str:
@@ -27,6 +27,7 @@ def notes(version: str, repository: str, target: str, previous: str = "") -> str
     lines = [f"# What's new in {version}", "", "Minecraft 26.2 · Fabric · Java 25", ""]
     for entry in log.splitlines():
         commit, subject = entry.split("\t", 1)
+        subject = subject or "Untitled commit"
         subject = re.sub(r"([\\`*_{}\[\]<>])", r"\\\1", subject).replace("@", "&#64;")
         lines.append(f"- {subject} ([{commit[:7]}]({url}/commit/{commit}))")
     if not log:

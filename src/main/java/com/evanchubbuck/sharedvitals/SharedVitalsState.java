@@ -54,6 +54,7 @@ public final class SharedVitalsState extends SavedData {
     private final Map<UUID, ServerPlayer> members = new LinkedHashMap<>();
     private boolean applying;
     private int lastFoodTick = Integer.MIN_VALUE;
+    private int lastPeacefulTick = Integer.MIN_VALUE;
 
     public SharedVitalsState() { effects = new SharedEffects(); }
 
@@ -151,7 +152,8 @@ public final class SharedVitalsState extends SavedData {
 
     public void healthChanged(ServerPlayer player) {
         // Zero is provisional until vanilla has tried the damaged player's totem/death protection.
-        if (!applying && contains(player) && health > 0 && player.getHealth() > 0) {
+        // Join reconciliation may clamp private health before the player adopts the pool.
+        if (!applying && !applyingAbsorption && contains(player) && health > 0 && player.getHealth() > 0) {
             publishHealth(Math.min(player.getHealth(), maximumHealth()));
         }
     }
@@ -203,8 +205,19 @@ public final class SharedVitalsState extends SavedData {
         // Direct absorption grants can have no effect on teammates to supply capacity.
         // A transient modifier preserves their normal base attribute and effect modifiers.
         if (capacity.getValue() < absorption) {
+            double base = capacity.getBaseValue();
+            double baseMultiplier = 1;
+            double totalMultiplier = 1;
+            for (var modifier : capacity.getModifiers()) {
+                switch (modifier.operation()) {
+                    case ADD_VALUE -> base += modifier.amount();
+                    case ADD_MULTIPLIED_BASE -> baseMultiplier += modifier.amount();
+                    case ADD_MULTIPLIED_TOTAL -> totalMultiplier *= 1 + modifier.amount();
+                }
+            }
+            // Vanilla also multiplies ADD_VALUE modifiers; solve for the unscaled bonus.
             capacity.addTransientModifier(new AttributeModifier(ABSORPTION_CAPACITY,
-                    absorption - capacity.getValue(), AttributeModifier.Operation.ADD_VALUE));
+                    absorption / (baseMultiplier * totalMultiplier) - base, AttributeModifier.Operation.ADD_VALUE));
         }
         player.setAbsorptionAmount(absorption);
     }
@@ -325,6 +338,15 @@ public final class SharedVitalsState extends SavedData {
         int tick = player.level().getServer().getTickCount();
         if (lastFoodTick == tick) return false;
         lastFoodTick = tick;
+        return true;
+    }
+
+    public boolean allowPeacefulRegeneration(ServerPlayer player) {
+        if (!contains(player)) return true;
+        if (!isFoodLeader(player)) return false;
+        int tick = player.level().getServer().getTickCount();
+        if (lastPeacefulTick == tick) return false;
+        lastPeacefulTick = tick;
         return true;
     }
 

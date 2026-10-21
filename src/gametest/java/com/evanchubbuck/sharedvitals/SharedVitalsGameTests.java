@@ -17,6 +17,7 @@ import net.minecraft.network.protocol.game.ClientboundSoundPacket;
 import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
 import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
 import net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket;
+import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryOps;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
@@ -30,6 +31,7 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
@@ -392,6 +394,49 @@ public final class SharedVitalsGameTests {
     }
 
     @GameTest
+    public void multiplicativeAbsorptionCapacityPreservesSharedHearts(GameTestHelper helper) {
+        var baseOperation = AttributeModifier.Operation.ADD_MULTIPLIED_BASE;
+        var totalOperation = AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL;
+        for (var operations : List.of(List.of(baseOperation), List.of(totalOperation), List.of(baseOperation, totalOperation))) {
+            for (double base : List.of(0D, 4D)) {
+                try (var f = new Fixture(helper)) {
+                    var a = f.player();
+                    var b = f.player();
+                    var capacity = b.getAttribute(Attributes.MAX_ABSORPTION);
+                    capacity.setBaseValue(base);
+                    var offset = new AttributeModifier(Identifier.fromNamespaceAndPath("shared_vitals_tests", "offset"),
+                            -2D, AttributeModifier.Operation.ADD_VALUE);
+                    capacity.addTransientModifier(offset);
+                    var modifiers = new ArrayList<AttributeModifier>();
+                    modifiers.add(offset);
+                    for (var operation : operations) {
+                        var modifier = new AttributeModifier(Identifier.fromNamespaceAndPath("shared_vitals_tests", "capacity_" + operation.ordinal()),
+                                -0.5D, operation);
+                        capacity.addTransientModifier(modifier);
+                        modifiers.add(modifier);
+                    }
+                    double personalCapacity = capacity.getValue();
+                    a.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(20);
+                    a.setAbsorptionAmount(8);
+                    helper.assertValueEqual(b.getAbsorptionAmount(), 8F, "Multipliers cannot reduce the teammate's shared hearts");
+                    b.hurtServer(b.level(), b.damageSources().generic(), 2);
+                    helper.assertValueEqual(a.getAbsorptionAmount(), 6F, "The hit consumes exactly two shared absorption points");
+                    helper.assertValueEqual(b.getAbsorptionAmount(), 6F, "The affected teammate keeps the same remaining pool");
+                    helper.assertValueEqual(a.getHealth(), 20F, "The shared hearts absorb the whole hit");
+                    helper.assertValueEqual(b.getHealth(), 20F, "The teammate's health remains protected");
+                    a.setAbsorptionAmount(0);
+                    helper.assertValueEqual(capacity.getValue(), personalCapacity, "Emptying the pool removes temporary capacity");
+                    helper.assertValueEqual(capacity.getBaseValue(), base, "The personal base capacity is preserved");
+                    for (var modifier : modifiers) {
+                        helper.assertTrue(capacity.getModifier(modifier.id()) == modifier, "Personal modifiers are preserved");
+                    }
+                }
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
     public void legacyWorldSeedsAbsorptionFromExistingPlayer(GameTestHelper helper) {
         try (var f = new Fixture(helper)) {
             var a = f.player();
@@ -724,6 +769,65 @@ public final class SharedVitalsGameTests {
             b.doTick();
             helper.assertValueEqual(a.getHealth(), 11F, "Peaceful healing does not multiply with player count");
             helper.assertValueEqual(b.getHealth(), 11F, "Peaceful healing is shared");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void peacefulHealingSurvivesLeaderChangeWithinOneTick(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            f.server.setDifficulty(Difficulty.PEACEFUL, true);
+            a.setHealth(10);
+            a.getFoodData().setFoodLevel(10);
+            a.tickCount = 20;
+            b.tickCount = 20;
+            a.doTick();
+            helper.assertValueEqual(b.getHealth(), 11F, "The first leader applies one peaceful heal");
+            a.setGameMode(GameType.CREATIVE);
+            b.doTick();
+            helper.assertValueEqual(b.getHealth(), 11F, "Changing leaders cannot heal twice in one server tick");
+            helper.assertValueEqual(b.getFoodData().getFoodLevel(), 11, "Changing leaders cannot feed the group twice");
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void joiningWithPrivateHealthBoostPreservesSharedHealth(GameTestHelper helper) {
+        for (boolean sharedBoost : List.of(false, true)) {
+            try (var f = new Fixture(helper)) {
+                var a = f.player();
+                if (sharedBoost) a.addEffect(new MobEffectInstance(MobEffects.HEALTH_BOOST, 200));
+                a.setHealth(7);
+                var b = f.player();
+                f.state.leave(b);
+                b.addEffect(new MobEffectInstance(MobEffects.HEALTH_BOOST, 200, 2));
+                b.setHealth(30);
+                helper.assertValueEqual(a.getHealth(), 7F, "The joining player's private health is isolated");
+                f.state.join(b);
+                helper.assertValueEqual(a.getHealth(), 7F, "Reconciling private Health Boost cannot overwrite the pool");
+                helper.assertValueEqual(b.getHealth(), 7F, "The joining player adopts the existing pool");
+                helper.assertValueEqual(b.getMaxHealth(), sharedBoost ? 24F : 20F, "The shared health capacity is adopted");
+                helper.assertTrue(b.getEffect(MobEffects.HEALTH_BOOST) == a.getEffect(MobEffects.HEALTH_BOOST),
+                        "Private Health Boost is removed or replaced with the shared effect");
+            }
+        }
+        helper.succeed();
+    }
+
+    @GameTest
+    public void removingHealthBoostClampsSharedHealthImmediately(GameTestHelper helper) {
+        try (var f = new Fixture(helper)) {
+            var a = f.player();
+            var b = f.player();
+            a.getAttribute(Attributes.MAX_HEALTH).setBaseValue(40);
+            a.addEffect(new MobEffectInstance(MobEffects.HEALTH_BOOST, 200));
+            a.setHealth(24);
+            helper.assertValueEqual(b.getHealth(), 24F, "Health Boost supports the larger shared pool");
+            a.removeEffect(MobEffects.HEALTH_BOOST);
+            helper.assertValueEqual(a.getHealth(), 20F, "A teammate's lower health cap immediately clamps the pool");
+            helper.assertValueEqual(b.getHealth(), 20F, "Effect removal keeps the same health on every participant");
         }
         helper.succeed();
     }

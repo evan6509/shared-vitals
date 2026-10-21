@@ -13,6 +13,6 @@ public abstract class ServerPlayerMixin {
     private void sharedVitals$peacefulRegenerationOnce(CallbackInfo ci) {
         var player = (ServerPlayer) (Object) this;
         var state = SharedVitalsState.get(player.level().getServer());
-        if (state.contains(player) && !state.isFoodLeader(player)) ci.cancel();
+        if (!state.allowPeacefulRegeneration(player)) ci.cancel();
     }
 }

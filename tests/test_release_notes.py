@@ -68,6 +68,13 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertIn(r"\[health\]", output)
         self.assertNotIn("@everyone", output)
 
+    def test_final_commit_with_empty_subject_has_placeholder(self):
+        self.git("commit", "--allow-empty", "--allow-empty-message", "-m", "")
+        target = self.git("rev-parse", "HEAD")
+        output = release_notes.notes("0.1.2", "owner/shared-vitals", target, "v0.1.1")
+        self.assertIn(f"- Untitled commit ([{target[:7]}]", output)
+        self.assertIn(f"/commit/{target}", output)
+
 
 if __name__ == "__main__":
     unittest.main()
