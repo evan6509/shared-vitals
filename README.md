@@ -3,12 +3,26 @@
 A server-side Fabric mod for Minecraft 26.2 where survival and adventure players
 share health, hunger, absorption hearts, status effects, and death across every dimension.
 
-**Status:** first gameplay implementation. Multiplayer client playtesting is still needed.
+**Status:** active development on `codex/development`. Multiplayer client playtesting
+is still needed; the behavior below describes this branch, including changes since v0.1.3.
 
 - Mod name: **Shared Vitals**
 - GitHub repository: [shared-vitals](https://github.com/evan6509/shared-vitals)
 - Mod ID: `shared_vitals`
-- Requirements: Java 25, Fabric Loader 0.19.3+, Fabric API for Minecraft 26.2
+- Requirements: Minecraft **26.2**, Java **25**, Fabric Loader **0.19.3+**,
+  and Fabric API **0.154.2+26.2** (the standalone build pin).
+  Linked Hardcore requires the newer API described below.
+- Minecraft 26.3 is not a supported build target.
+
+## Download
+
+The latest public release is [v0.1.3](https://github.com/evan6509/shared-vitals/releases/tag/v0.1.3),
+published **2026-10-16** and verified on **2026-10-24**. Download the
+[mod JAR](https://github.com/evan6509/shared-vitals/releases/download/v0.1.3/shared-vitals-0.1.3%2Bmc26.2.jar),
+[changelog](https://github.com/evan6509/shared-vitals/releases/download/v0.1.3/CHANGELOG.md),
+and [SHA256SUMS](https://github.com/evan6509/shared-vitals/releases/download/v0.1.3/SHA256SUMS).
+Use the release JAR for v0.1.3; the current `codex/development` branch may
+contain later changes.
 
 ## Gameplay
 
@@ -51,7 +65,8 @@ share health, hunger, absorption hearts, status effects, and death across every 
 
 Install the mod JAR and Fabric API on the server; connecting players can use
 vanilla clients. For singleplayer, install them in your Fabric client's `mods`
-folder. No commands or setup are required.
+folder. Standalone sharing needs no commands or configuration; Linked Hardcore
+integration is opt-in.
 
 The shared health cap is the smallest maximum health among living participants,
 so health-changing effects cannot leave different players with different values.
@@ -77,8 +92,9 @@ the world folders that Linked Hardcore's reset executor deletes. Configure each
 backend once, including standby backends, using their consoles if needed. It
 does not need to be enabled again for each new world.
 
-Health and hunger still share during play. On the first actual death, Shared
-Vitals leaves that death for Linked Hardcore to report and puts surviving
+Health and hunger still share during play. On the first actual player death
+(including an excluded game mode), Shared Vitals leaves that death for Linked
+Hardcore to report and puts surviving
 participants into spectator. It does not kill teammates or create extra death
 reports. Linked Hardcore handles its wait/countdown, death counters, run timer,
 proxy transfer, and world reset as usual. A totem save does not end the run.
@@ -99,7 +115,10 @@ death behavior. Mode changes are refused once a source run has ended, so a
 pending transfer cannot accidentally reopen that world. Enabling requires the
 `linkedhardcore` Fabric mod; startup also rejects an enabled configuration if
 that mod was removed. Your existing Linked Hardcore backend/proxy setup is still
-required. Its current mod requires Fabric API **0.156.0+26.2 or later**.
+required. The companion currently targets Minecraft 26.2 and requires Fabric API
+**0.156.0+26.2 or later for Minecraft 26.2**. Install an API version satisfying
+both mods; Shared Vitals' standalone **0.154.2+26.2** pin is insufficient for the
+companion. This integration does not establish support for newer Minecraft versions.
 
 Sharing is local to each backend. This mode supports Linked Hardcore's group
 handoff between backends; it does not synchronize individual health/hunger
@@ -107,19 +126,36 @@ changes between separate, simultaneously active servers.
 
 ## Build
 
+Use JDK 25 and the included Gradle wrapper (Gradle 9.6.1).
+
 ```sh
 ./gradlew build
 ```
 
 On Windows, use `gradlew.bat build`. The installable JAR is
-`build/libs/shared-vitals-0.1.0+mc26.2.jar`; the `-sources.jar` is for development.
+`build/libs/shared-vitals-0.1.0+mc26.2.jar` by default; the `-sources.jar` is for
+development. `SHARED_VITALS_VERSION` overrides the local `0.1.0` version during
+release builds. The local default is not the latest published release version.
+
+The repository includes headless GameTests and Python release-tool tests. See
+[the local checks and optional companion run](docs/DEVELOPMENT.md#local-checks)
+for commands, including the `-Pfabric_version=0.156.0+26.2` override when loading
+the real Linked Hardcore JAR. Without that JAR, companion-specific assertions
+are skipped. Test coverage does not establish connected-client gameplay, a real
+Velocity handoff, or a world-reset deployment; those need manual validation.
 
 ## Contributing and releases
 
 Work on `codex/development`. Merge into `main` when you want a release.
-Once hosted on GitHub, development pushes and pull requests run build checks.
-Every push to `main` builds and publishes a GitHub Release containing the mod JAR,
-`CHANGELOG.md`, and `SHA256SUMS`. This includes the first push and direct commits
-to `main` as well as merges.
+Pushes to `codex/development` and pull requests targeting it or `main` run
+Python release-tool tests, a build, headless GameTests, and JAR verification.
+The CI workflow does not upload downloadable mod artifacts.
+
+Every push to `main` triggers the release workflow, including direct commits and
+merges. After checks pass, it creates a draft GitHub Release, uploads the mod JAR,
+`CHANGELOG.md`, and `SHA256SUMS`, downloads and verifies the assets, then publishes.
+A failed upload or verification leaves a draft for retry. Versions are
+`0.1.<release workflow run number>`; reruns retain the same version. The workflow
+does not commit version bumps or changelogs back to the repository.
 
 See [the development guide](docs/DEVELOPMENT.md) for branch and release details.
